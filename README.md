@@ -1,0 +1,1 @@
+# Lab2_HW_SpeechTextTranslator
