@@ -7,16 +7,19 @@ import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import android.util.Log
 import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import com.example.speechtotext.databinding.ActivityMainBinding
-import retrofit2.Call
-import retrofit2.Callback
-import retrofit2.Response
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import java.util.Locale
@@ -27,6 +30,16 @@ class MainActivity : AppCompatActivity() {
     private var speechRecognizer: SpeechRecognizer? = null
     private lateinit var speechIntent: Intent
     private var isListening = false
+
+    // Cấu hình API Langbly
+    private val BASE_URL = "https://api.langbly.com/"
+    private val API_KEY = "YOUR_API_KEY_HERE" // Thay bằng key của bạn
+
+    private val apiService = Retrofit.Builder()
+        .baseUrl(BASE_URL)
+        .addConverterFactory(GsonConverterFactory.create())
+        .build()
+        .create(ApiService::class.java)
 
     data class Language(val name: String, val code: String) {
         override fun toString(): String = name
@@ -40,13 +53,6 @@ class MainActivity : AppCompatActivity() {
         Language("Korean", "ko")
     )
 
-    private val retrofit = Retrofit.Builder()
-        .baseUrl("https://libretranslate.com/")
-        .addConverterFactory(GsonConverterFactory.create())
-        .build()
-
-    private val translateApi = retrofit.create(LibreTranslateApi::class.java)
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
@@ -56,11 +62,7 @@ class MainActivity : AppCompatActivity() {
         setupSpeechRecognizer()
 
         binding.btnRecord.setOnClickListener {
-            if (isListening) {
-                stopListening()
-            } else {
-                checkPermissionAndStart()
-            }
+            if (isListening) stopListening() else checkPermissionAndStart()
         }
     }
 
@@ -72,101 +74,106 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupSpeechRecognizer() {
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            binding.tvOriginalText.text = "Speech recognition is not available on this device"
-            binding.btnRecord.isEnabled = false
+            binding.tvOriginalText.text = "Máy không hỗ trợ nhận diện giọng nói"
             return
         }
 
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
-
         speechIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(
-                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
-            )
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-            putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak now...")
         }
 
         speechRecognizer?.setRecognitionListener(object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) {
-                binding.tvOriginalText.text = "Listening..."
+                binding.tvOriginalText.text = "Đang lắng nghe..."
             }
 
-            override fun onBeginningOfSpeech() {}
-
-            override fun onRmsChanged(rmsdB: Float) {}
-
-            override fun onBufferReceived(buffer: ByteArray?) {}
-
-            override fun onEndOfSpeech() {}
-
             override fun onError(error: Int) {
-                val message = when (error) {
-                    SpeechRecognizer.ERROR_AUDIO -> "Audio recording error"
-                    SpeechRecognizer.ERROR_CLIENT -> "Client side error"
-                    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Permission denied"
-                    SpeechRecognizer.ERROR_NETWORK -> "Network error"
-                    SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Network timeout"
-                    SpeechRecognizer.ERROR_NO_MATCH -> "No speech recognized"
-                    SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Recognizer busy"
-                    SpeechRecognizer.ERROR_SERVER -> "Server error"
-                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "No speech input"
-                    else -> "Unknown error"
+                if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
+                    stopListening()
                 }
-
-                binding.tvOriginalText.text = "Error: $message"
-
-                if (isListening &&
-                    (error == SpeechRecognizer.ERROR_NO_MATCH ||
-                            error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT)
-                ) {
-                    speechRecognizer?.cancel()
-                    speechRecognizer?.startListening(speechIntent)
-                } else {
-                    isListening = false
-                    binding.btnRecord.text = "Start Recording"
-                }
+                Log.e("Speech", "Error code: $error")
+                isListening = false
+                binding.btnRecord.text = "Bắt đầu"
             }
 
             override fun onResults(results: Bundle?) {
-                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                val text = matches?.firstOrNull().orEmpty()
-
-                if (text.isNotBlank()) {
+                val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+                if (!text.isNullOrBlank()) {
                     binding.tvOriginalText.text = text
                     translateText(text)
                 }
-
-                if (isListening) {
-                    speechRecognizer?.startListening(speechIntent)
-                }
+                isListening = false
+                binding.btnRecord.text = "Bắt đầu"
             }
 
             override fun onPartialResults(partialResults: Bundle?) {
-                val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                val text = matches?.firstOrNull().orEmpty()
-
-                if (text.isNotBlank()) {
-                    binding.tvOriginalText.text = text
-                }
+                val text = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+                if (!text.isNullOrBlank()) binding.tvOriginalText.text = text
             }
 
+            override fun onBeginningOfSpeech() {}
+            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onEndOfSpeech() {}
             override fun onEvent(eventType: Int, params: Bundle?) {}
         })
     }
 
+    private fun translateText(text: String) {
+        val selectedLang = binding.spinnerLanguage.selectedItem as Language
+        binding.progressBar.visibility = View.VISIBLE
+
+        lifecycleScope.launch {
+            try {
+                val sourceLang = Locale.getDefault().language
+
+                val request = TranslationRequest(
+                    q = text,
+                    source = sourceLang,
+                    target = selectedLang.code
+                )
+
+                val response = withContext(Dispatchers.IO) {
+                    apiService.translate("Bearer $API_KEY", request)
+                }
+
+                if (response.isSuccessful) {
+                    val rawBody = response.body()?.string()
+                    val translatedText = parseJson(rawBody)
+                    binding.tvTranslatedText.text = translatedText
+                } else {
+                    val error = response.errorBody()?.string()
+                    binding.tvTranslatedText.text = "Lỗi dịch: Kiểm tra API Key"
+                    Log.e("API", "Error: $error")
+                }
+            } catch (e: Exception) {
+                binding.tvTranslatedText.text = "Lỗi kết nối: ${e.message}"
+            } finally {
+                binding.progressBar.visibility = View.GONE
+            }
+        }
+    }
+
+    private fun parseJson(jsonStr: String?): String {
+        if (jsonStr == null) return ""
+        return try {
+            val json = JSONObject(jsonStr)
+            val nested = json.optJSONObject("data")
+                ?.optJSONArray("translations")
+                ?.optJSONObject(0)
+                ?.optString("translatedText", "")
+            if (!nested.isNullOrBlank()) return nested
+            
+            json.optString("translatedText", "")
+        } catch (e: Exception) { "" }
+    }
+
     private fun checkPermissionAndStart() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
-            ActivityCompat.requestPermissions(
-                this,
-                arrayOf(Manifest.permission.RECORD_AUDIO),
-                100
-            )
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 100)
         } else {
             startListening()
         }
@@ -174,64 +181,15 @@ class MainActivity : AppCompatActivity() {
 
     private fun startListening() {
         isListening = true
-        binding.btnRecord.text = "Stop Recording"
-        binding.tvTranslatedText.text = ""
+        binding.btnRecord.text = "Dừng"
         speechRecognizer?.startListening(speechIntent)
     }
 
     private fun stopListening() {
         isListening = false
+        binding.btnRecord.text = "Bắt đầu"
         speechRecognizer?.stopListening()
         speechRecognizer?.cancel()
-        binding.btnRecord.text = "Start Recording"
-    }
-
-    private fun translateText(text: String) {
-        val selectedLanguage = binding.spinnerLanguage.selectedItem as Language
-        val request = TranslationRequest(
-            query = text,
-            target = selectedLanguage.code
-        )
-
-        binding.progressBar.visibility = View.VISIBLE
-
-        translateApi.translate(request).enqueue(object : Callback<TranslationResponse> {
-            override fun onResponse(
-                call: Call<TranslationResponse>,
-                response: Response<TranslationResponse>
-            ) {
-                binding.progressBar.visibility = View.GONE
-
-                if (response.isSuccessful) {
-                    binding.tvTranslatedText.text =
-                        response.body()?.translatedText ?: "No translation"
-                } else {
-                    binding.tvTranslatedText.text = "Translation failed: ${response.code()}"
-                }
-            }
-
-            override fun onFailure(call: Call<TranslationResponse>, t: Throwable) {
-                binding.progressBar.visibility = View.GONE
-                binding.tvTranslatedText.text = "Error: ${t.message}"
-            }
-        })
-    }
-
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-
-        if (requestCode == 100 &&
-            grantResults.isNotEmpty() &&
-            grantResults[0] == PackageManager.PERMISSION_GRANTED
-        ) {
-            startListening()
-        } else {
-            Toast.makeText(this, "Permission denied", Toast.LENGTH_SHORT).show()
-        }
     }
 
     override fun onDestroy() {
